@@ -1,0 +1,4 @@
+storeFile=D:/private/codex-bridge-release.jks
+storePassword=REPLACE_LOCALLY
+keyAlias=codex-bridge
+keyPassword=REPLACE_LOCALLY

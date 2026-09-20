@@ -1,0 +1,11 @@
+{
+  "name": "codex-android-workspace", "private": true,
+  "workspaces": ["apps/bridge", "packages/protocol"],
+  "engines": { "node": ">=24 <26" },
+  "scripts": {
+    "build": "npm run build -w @codex-bridge/protocol && npm run build -w @codex-bridge/server",
+    "test": "npm run build && npm run test -w @codex-bridge/server",
+    "bridge": "node apps/bridge/dist/cli.js", "smoke": "node apps/bridge/dist/smoke.js",
+    "protocol:generate": "node scripts/generate-protocol.mjs"
+  }
+}

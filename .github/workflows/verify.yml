@@ -1,0 +1,36 @@
+name: Verify
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  bridge:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm install -g @openai/codex@0.155.1
+      - run: npm run smoke
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned Flutter
+        run: |
+          git clone --depth 1 --branch 3.47.5 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - run: flutter pub get
+        working-directory: apps/android
+      - run: flutter analyze
+        working-directory: apps/android
+      - run: flutter test
+        working-directory: apps/android
+      - run: flutter build apk --debug
+        working-directory: apps/android

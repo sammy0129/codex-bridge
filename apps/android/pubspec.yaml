@@ -1,0 +1,29 @@
+name: codex_bridge
+description: Personal remote coding workbench. Unofficial Codex client.
+publish_to: none
+version: 0.1.0+1
+environment:
+  sdk: ^3.13.4
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^3.4.3
+  flutter_secure_storage: ^11.2.0
+  flutter_markdown_plus: ^1.0.0
+  flutter_code_editor: ^0.3.5
+  highlight: ^0.7.0
+  xterm: ^4.0.0
+  crypto: ^3.0.6
+  uuid: ^4.5.1
+  mobile_scanner: ^7.2.0
+  image_picker: ^1.2.0
+  url_launcher: ^6.3.2
+  path_provider: ^2.1.5
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+flutter:
+  uses-material-design: true

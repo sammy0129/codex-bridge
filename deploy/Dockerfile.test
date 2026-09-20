@@ -1,0 +1,13 @@
+FROM node:24-bookworm
+WORKDIR /work
+COPY package.json package-lock.json ./
+COPY apps/bridge/package.json apps/bridge/package.json
+COPY packages/protocol/package.json packages/protocol/package.json
+RUN npm ci
+COPY apps/bridge apps/bridge
+COPY packages/protocol packages/protocol
+RUN npm run build
+RUN npm install -g @openai/codex@0.155.1
+RUN chown -R node:node /work
+USER node
+CMD ["npm", "test"]
