@@ -50,7 +50,7 @@ async function main(): Promise<void> {
     await codex.start(); app = await createServer(controller, config);
     await app.listen({ host: config.host, port: config.port });
   } catch (error) { await codex.stop(); store.close(); await unlock?.(); throw error; }
-  console.log(`Codex Bridge 0.1.0 | ${config.publicUrl} | authenticated HTTPS/WSS | Codex 0.155.1`);
+  console.log(`Codex Bridge 0.1.1 | ${config.publicUrl} | authenticated HTTPS/WSS | Codex 0.155.1`);
   let stopping = false;
   const stop = async () => {
     if (stopping) return; stopping = true;

@@ -370,6 +370,7 @@ class TaskList extends StatefulWidget {
 
 class _TaskListState extends State<TaskList> {
   Timer? debounce;
+  bool menuOpen = false;
   @override
   void dispose() {
     debounce?.cancel();
@@ -378,12 +379,20 @@ class _TaskListState extends State<TaskList> {
 
   Future<void> open(Json task) async {
     final workbench = widget.workbench;
+    final scope = workbench.threadActionContext;
     try {
       if (workbench.archived) {
-        await workbench.archiveThread(task['id'] as String, true);
+        await workbench.archiveThread(
+          task['id'] as String,
+          true,
+          context: scope,
+        );
       }
+      if (!mounted || scope != workbench.threadActionContext) return;
       await workbench.openThread(task['id'] as String);
-      widget.onOpened?.call();
+      if (mounted && scope == workbench.threadActionContext) {
+        widget.onOpened?.call();
+      }
     } on RpcException catch (error) {
       if ([
         'CONFIRM_EXTERNAL_STOPPED',
@@ -430,6 +439,150 @@ class _TaskListState extends State<TaskList> {
       }
     } catch (error) {
       workbench.showError(error);
+    }
+  }
+
+  Future<void> showActions(Json task) async {
+    if (menuOpen) return;
+    menuOpen = true;
+    final workbench = widget.workbench;
+    final scope = workbench.threadActionContext;
+    final id = task['id'] as String;
+    final restore = workbench.archived;
+    final title =
+        task['name']?.toString() ?? task['preview']?.toString() ?? '新任务';
+    String? blocked({bool delete = false}) =>
+        scope != workbench.threadActionContext
+        ? '主机或项目已切换，请重新操作'
+        : workbench.threadActionBlocked(id, delete: delete);
+    try {
+      final action = await showModalBottomSheet<String>(
+        context: context,
+        useSafeArea: true,
+        isScrollControlled: true,
+        builder: (context) => AnimatedBuilder(
+          animation: workbench,
+          builder: (context, _) {
+            final reason = blocked();
+            final deleteReason = blocked(delete: true);
+            final colors = Theme.of(context).colorScheme;
+            return SafeArea(
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
+                      child: Text(
+                        title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    ListTile(
+                      leading: Icon(
+                        restore
+                            ? Icons.unarchive_outlined
+                            : Icons.archive_outlined,
+                      ),
+                      title: Text(restore ? '恢复会话' : '归档会话'),
+                      subtitle: reason == null ? null : Text(reason),
+                      enabled: reason == null,
+                      onTap: reason == null
+                          ? () => Navigator.pop(context, 'archive')
+                          : null,
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.delete_outline),
+                      title: const Text('删除会话'),
+                      textColor: colors.error,
+                      iconColor: colors.error,
+                      subtitle: deleteReason == null
+                          ? null
+                          : Text(deleteReason),
+                      enabled: deleteReason == null,
+                      onTap: deleteReason == null
+                          ? () => Navigator.pop(context, 'delete')
+                          : null,
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text('取消'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      );
+      if (!mounted ||
+          action == null ||
+          scope != workbench.threadActionContext) {
+        return;
+      }
+      if (action == 'delete') {
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AnimatedBuilder(
+            animation: workbench,
+            builder: (context, _) {
+              final reason = blocked(delete: true);
+              return AlertDialog(
+                title: const Text('删除会话'),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, maxLines: 2, overflow: TextOverflow.ellipsis),
+                    const SizedBox(height: 12),
+                    const Text('永久删除此会话及其历史记录？此操作无法撤销，不会删除项目文件。'),
+                    if (reason != null) ...[
+                      const SizedBox(height: 12),
+                      Text(reason),
+                    ],
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('取消'),
+                  ),
+                  FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Theme.of(context).colorScheme.error,
+                    ),
+                    onPressed: reason == null
+                        ? () => Navigator.pop(context, true)
+                        : null,
+                    child: const Text('永久删除'),
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+        if (!mounted ||
+            confirmed != true ||
+            scope != workbench.threadActionContext) {
+          return;
+        }
+        await guard(
+          workbench,
+          () => workbench.deleteThread(id, context: scope),
+        );
+      } else {
+        await guard(
+          workbench,
+          () => workbench.archiveThread(id, restore, context: scope),
+        );
+      }
+    } finally {
+      menuOpen = false;
     }
   }
 
@@ -530,6 +683,7 @@ class _TaskListState extends State<TaskList> {
                           ? const Text('正在执行', style: TextStyle(fontSize: 11))
                           : null,
                       onTap: workbench.online ? () => open(task) : null,
+                      onLongPress: () => showActions(task),
                     );
                   },
                 ),

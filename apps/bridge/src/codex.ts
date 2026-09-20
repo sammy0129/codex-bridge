@@ -57,7 +57,7 @@ export class CodexPeer extends EventEmitter implements RpcPeer {
         }
       } catch { this.emit('protocolWarning', { message: 'Unreadable upstream message' }); }
     });
-    await this.request('initialize', { clientInfo: { name: 'codex_android_bridge', title: 'Codex Bridge (Unofficial)', version: '0.1.0' }, capabilities: { experimentalApi: true } });
+    await this.request('initialize', { clientInfo: { name: 'codex_android_bridge', title: 'Codex Bridge (Unofficial)', version: '0.1.1' }, capabilities: { experimentalApi: true } });
     this.write({ method: 'initialized', params: {} });
     this.ready = true;
   }

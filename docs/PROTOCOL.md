@@ -62,7 +62,7 @@ Android 对 `image.url` 的内嵌图片本地解码，外部地址仅允许 HTTP
 
 - Bridge：`bridge/info`、`bridge/runtime`。
 - 项目：`projects/list`、`projects/add`（绝对 `path`、可选 `name`）、`projects/remove`。
-- 任务：`thread/list`、`thread/read`、`thread/start`、`thread/resume`、`thread/fork`、`thread/name/set`、`thread/archive`、`thread/unarchive`。
+- 任务：`thread/list`、`thread/read`、`thread/start`、`thread/resume`、`thread/fork`、`thread/name/set`、`thread/archive`、`thread/unarchive`、`thread/delete`。
 - 执行：`turn/start`、`turn/steer`、`turn/interrupt`。
 - 能力：`model/list`、`collaborationMode/list`、`skills/list`、`mcpServerStatus/list`、`configRequirements/read`、`account/read`。
 - 文件：`files/list`、`files/read`、`files/save`，参数为 `projectId` 与相对 `path`；保存还需要 `content`、`version`、可选 `bom`。
@@ -73,6 +73,15 @@ Android 对 `image.url` 的内嵌图片本地解码，外部地址仅允许 HTTP
 任务创建/恢复/分叉要求 `projectId`，可指定 `permissionMode`：`danger-full-access`、`workspace-write`、`read-only`。Bridge 负责映射上游权限字段；不能直接注入 `config`、`developerInstructions` 等配置。外部恢复额外要求 `confirmExternalStopped:true`，活动会话仍会被拒绝。
 
 终端写入使用 `deltaBase64`；调整尺寸使用 `cols` / `rows`。`terminal/read` 返回有界输出与 `cursor`，客户端只追加其后的输出事件。Bridge 在输出事件中附加跨 UTF-8 分片正确解码的 `textDelta`。
+
+## 会话归档与永久删除
+
+- Android 任务侧栏支持长按归档、恢复和删除；删除需二次确认。只允许操作 Bridge 已管理且处于空闲状态的会话，不会为了删除自动恢复、接管或停止外部会话。
+- `thread/delete` 要求 `{projectId, threadId}`。Bridge 校验项目归属后调用固定版本 Codex 的原生删除接口，只转发 `{threadId}`；不接受客户端文件路径，也不直接删除历史文件或项目文件。归档/恢复同样检查归属；旧的无 `projectId` 归档请求保持兼容。
+- `bridge/info` 和握手能力列表新增 `threadDelete`。旧 Bridge 的 Android 客户端仍可归档，但删除入口提示升级，不发送删除请求。
+- 正在执行、启动中、同会话操作进行中返回 `THREAD_BUSY`；状态未知返回 `OUTCOME_UNKNOWN`；待审批请求未处理返回 `THREAD_PENDING_APPROVAL`；外部和跨项目分别返回 `EXTERNAL_THREAD`、`PROJECT_MISMATCH`。管理操作与启动/恢复共享会话锁。
+- 删除成功会清理 Bridge 会话运行记录并发布 `thread/deleted`；上游先发同一通知时不额外发布。手机幂等清除对应历史、图片缓存及草稿恢复数据，保存按主机隔离的删除标记，阻止旧响应恢复内容。
+- 归档保留历史；永久删除调用 Codex 原生语义，不等于擦除备份、Bridge 事件日志或请求去重记录。超时、断线或未知结果不自动重试；成功后的列表刷新失败单独提示，不报告为删除失败。
 
 ## 审批与兼容性
 

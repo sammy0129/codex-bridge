@@ -18,6 +18,7 @@ final workbenchProvider = ChangeNotifierProvider<Workbench>((ref) {
 });
 
 typedef TransportFactory = BridgeTransport Function(Host host, String token);
+typedef ThreadActionContext = (int, String?, String?);
 
 class Workbench extends ChangeNotifier {
   final LocalStore storage;
@@ -60,9 +61,17 @@ class Workbench extends ChangeNotifier {
   StreamSubscription<String>? _statuses;
   Timer? _saveTimer;
   int _generation = 0;
+  int _contextGeneration = 0;
+  int _threadListRevision = 0;
+  final _threadActions = <(String?, String)>{};
+  final _deletedThreads = <String, Set<String>>{};
   bool _disposed = false;
 
   bool get online => status == 'online';
+  ThreadActionContext get threadActionContext =>
+      (_contextGeneration, host?.id, projectId);
+  bool _threadDeleted(String id) =>
+      _deletedThreads[host?.id]?.contains(id) ?? false;
   Json? get project =>
       projects.where((value) => value['id'] == projectId).firstOrNull;
   Json? get currentThread =>
@@ -139,6 +148,7 @@ class Workbench extends ChangeNotifier {
   }
 
   Future<void> selectHost(Host selected) async {
+    _contextGeneration++;
     final generation = ++_generation;
     imageLoader.cache.clear();
     imageDrafts.bind(null, null, null);
@@ -175,6 +185,10 @@ class Workbench extends ChangeNotifier {
     notifyListeners();
     final cache = await storage.read('cache-${selected.id}');
     if (generation != _generation) return;
+    final deleted = _deletedThreads.putIfAbsent(selected.id, () => <String>{});
+    deleted.addAll(
+      (cache['deletedThreads'] as List? ?? []).whereType<String>(),
+    );
     projects = asList(cache['projects']);
     threads = asList(cache['threads']);
     timelines = asJson(cache['timelines']).map(
@@ -185,11 +199,23 @@ class Workbench extends ChangeNotifier {
     );
     projectId = cache['projectId'] as String?;
     threadId = cache['threadId'] as String?;
+    threads.removeWhere((entry) => deleted.contains(entry['id']));
+    timelines.removeWhere((id, _) => deleted.contains(id));
+    if (deleted.contains(threadId)) threadId = null;
+    for (final id in deleted) {
+      unawaited(
+        imageDrafts.forgetThread(selected.id, id).catchError(showError),
+      );
+    }
     imageDrafts.bind(selected.id, projectId, threadId);
     epoch = cache['epoch'] as String?;
     cursor = cache['cursor'] as int? ?? 0;
     approvals = asList(cache['approvals']);
     runtimeThreads = asList(cache['runtimeThreads']);
+    approvals.removeWhere(
+      (entry) => deleted.contains(asJson(entry['params'])['threadId']),
+    );
+    runtimeThreads.removeWhere((entry) => deleted.contains(entry['id']));
     final token = await storage.token(selected.id);
     if (generation != _generation) return;
     if (token == null) {
@@ -226,6 +252,7 @@ class Workbench extends ChangeNotifier {
       );
     }
     if (host?.id == removed.id) {
+      _contextGeneration++;
       imageDrafts.bind(null, null, null);
       ++_generation;
       _saveTimer?.cancel();
@@ -255,6 +282,14 @@ class Workbench extends ChangeNotifier {
       final runtime = asJson(message['runtime']);
       approvals = asList(runtime['approvals']);
       runtimeThreads = asList(runtime['threads']);
+      approvals.removeWhere(
+        (entry) => _threadDeleted(
+          asJson(entry['params'])['threadId']?.toString() ?? '',
+        ),
+      );
+      runtimeThreads.removeWhere(
+        (entry) => _threadDeleted(entry['id'] as String),
+      );
       if (message['reset'] == true) {
         cursor = message['cursor'] as int? ?? 0;
       }
@@ -323,6 +358,12 @@ class Workbench extends ChangeNotifier {
     final method = event['method'];
     final params = asJson(event['params']);
     final task = params['threadId'] as String?;
+    final eventTask = task ?? asJson(params['params'])['threadId'] as String?;
+    if (eventTask != null &&
+        _threadDeleted(eventTask) &&
+        method != 'thread/deleted') {
+      return;
+    }
     if (method == 'bridge/approval') {
       approvals.removeWhere((value) => value['id'] == params['id']);
       approvals.add(params);
@@ -345,16 +386,41 @@ class Workbench extends ChangeNotifier {
       approvals = [];
     }
     if (task == null) return;
+    if (method == 'thread/deleted') {
+      final selected = host?.id;
+      if (selected != null) _forgetThread(selected, task);
+      return;
+    }
+    if (_threadDeleted(task)) return;
+    if (method == 'thread/archived' || method == 'thread/unarchived') {
+      _threadListRevision++;
+      final isArchived = method == 'thread/archived';
+      if (archived != isArchived) {
+        threads.removeWhere((entry) => entry['id'] == task);
+      }
+      if (isArchived) _deselectThread(task);
+      return;
+    }
     if (method == 'turn/started') {
+      final owned = runtimeThreads
+          .where((entry) => entry['id'] == task)
+          .firstOrNull;
       runtimeThreads.removeWhere((value) => value['id'] == task);
       runtimeThreads.add({
+        if (owned?['project'] != null) 'project': owned!['project'],
         'id': task,
         'state': 'running',
         'turn': asJson(params['turn'])['id'],
       });
     }
     if (method == 'turn/completed') {
+      final owned = runtimeThreads
+          .where((entry) => entry['id'] == task)
+          .firstOrNull;
       runtimeThreads.removeWhere((value) => value['id'] == task);
+      if (owned?['project'] != null) {
+        runtimeThreads.add({...owned!, 'state': 'idle', 'turn': null});
+      }
       approvals.removeWhere(
         (value) => asJson(value['params'])['threadId'] == task,
       );
@@ -485,13 +551,25 @@ class Workbench extends ChangeNotifier {
     if (generation != _generation) return;
     projects = asList(result['projects']);
     if (!projects.any((value) => value['id'] == projectId)) {
+      _contextGeneration++;
       projectId = projects.firstOrNull?['id'] as String?;
       threadId = null;
     }
+    final revision = _threadListRevision;
     final runtime = asJson(await rpc('bridge/runtime'));
     if (generation != _generation) return;
-    runtimeThreads = asList(runtime['threads']);
-    approvals = asList(runtime['approvals']);
+    if (revision == _threadListRevision) {
+      runtimeThreads = asList(runtime['threads'])
+          .where((entry) => !_threadDeleted(entry['id'] as String))
+          .toList();
+      approvals = asList(runtime['approvals'])
+          .where(
+            (entry) => !_threadDeleted(
+              asJson(entry['params'])['threadId']?.toString() ?? '',
+            ),
+          )
+          .toList();
+    }
     if (info['ready'] == true) {
       final modelResult = asJson(await rpc('model/list', {'limit': 100}));
       if (generation != _generation) return;
@@ -519,6 +597,7 @@ class Workbench extends ChangeNotifier {
   }
 
   Future<void> selectProject(String id) async {
+    _contextGeneration++;
     projectId = id;
     threadId = null;
     imageDrafts.bind(host?.id, id, null);
@@ -549,6 +628,7 @@ class Workbench extends ChangeNotifier {
     final selected = projectId;
     final search = query;
     final archiveFilter = archived;
+    final revision = _threadListRevision;
     final result = asJson(
       await rpc('thread/list', {
         'projectId': selected,
@@ -559,12 +639,15 @@ class Workbench extends ChangeNotifier {
       }),
     );
     if (generation != _generation ||
+        revision != _threadListRevision ||
         selected != projectId ||
         search != query ||
         archiveFilter != archived) {
       return;
     }
-    final data = asList(result['data']);
+    final data = asList(result['data'])
+        .where((entry) => !_threadDeleted(entry['id'] as String))
+        .toList();
     threads = more
         ? [
             ...threads,
@@ -579,11 +662,12 @@ class Workbench extends ChangeNotifier {
   }
 
   Future<void> readThread(String id) async {
+    if (_threadDeleted(id)) return;
     final generation = _generation;
     final result = asJson(
       await rpc('thread/read', {'threadId': id, 'includeTurns': true}),
     );
-    if (generation != _generation) return;
+    if (generation != _generation || _threadDeleted(id)) return;
     final thread = asJson(result['thread']);
     timelines[id] = _timelineFromTurns(thread['turns']);
     notifyListeners();
@@ -595,6 +679,9 @@ class Workbench extends ChangeNotifier {
     bool confirmStopped = false,
     bool fork = false,
   }) async {
+    if (_threadDeleted(id) || _threadActions.contains((host?.id, id))) {
+      throw const RpcException('THREAD_BUSY', '会话已删除或正在处理中');
+    }
     final generation = _generation;
     final selected = projectId;
     final result = asJson(
@@ -605,9 +692,14 @@ class Workbench extends ChangeNotifier {
         if (confirmStopped) 'confirmExternalStopped': true,
       }),
     );
-    if (generation != _generation || selected != projectId) return;
+    if (generation != _generation ||
+        selected != projectId ||
+        _threadDeleted(id)) {
+      return;
+    }
     final thread = asJson(result['thread']);
     threadId = thread['id'] as String;
+    _recordOwnedThread(thread);
     imageDrafts.bind(host?.id, projectId, threadId);
     timelines[threadId!] = _timelineFromTurns(thread['turns']);
     await loadThreads();
@@ -639,6 +731,7 @@ class Workbench extends ChangeNotifier {
     }
     final thread = asJson(result['thread']);
     threadId = thread['id'] as String;
+    _recordOwnedThread(thread);
     if (preserveImageDraft) {
       imageDrafts.adoptThread(threadId!);
     } else {
@@ -770,13 +863,185 @@ class Workbench extends ChangeNotifier {
     await loadThreads();
   }
 
-  Future<void> archiveThread(String id, bool restore) async {
-    await rpc(restore ? 'thread/unarchive' : 'thread/archive', {
-      'threadId': id,
-      'projectId': projectId,
+  void _recordOwnedThread(Json thread) {
+    final id = thread['id'] as String;
+    runtimeThreads.removeWhere((entry) => entry['id'] == id);
+    runtimeThreads.add({
+      'id': id,
+      'project': projectId,
+      'state': asJson(thread['status'])['type'] == 'active'
+          ? 'running'
+          : 'idle',
+      'turn': asList(thread['turns'])
+          .where((turn) => turn['status'] == 'inProgress')
+          .firstOrNull?['id'],
     });
-    if (threadId == id && !restore) threadId = null;
-    await loadThreads();
+  }
+
+  String? threadActionBlocked(String id, {bool delete = false}) {
+    if (!online) return '连接主机后才能操作';
+    if (_threadDeleted(id)) return '此会话已删除';
+    if (_threadActions.contains((host?.id, id))) return '会话正在处理中';
+    if (delete && !supports('threadDelete')) return '请升级主机 Bridge 后删除会话';
+    final owned = runtimeThreads
+        .where((entry) => entry['id'] == id)
+        .firstOrNull;
+    if (owned == null || owned['project'] != projectId) {
+      return '不支持操作尚未由 Bridge 管理的会话';
+    }
+    if (['running', 'starting'].contains(owned['state'])) return '请等待任务停止后再操作';
+    if (owned['state'] != 'idle') return '会话状态未知，请刷新并核实后重新打开';
+    if (approvals.any((entry) => asJson(entry['params'])['threadId'] == id)) {
+      return '请先处理此会话的待审批请求';
+    }
+    return null;
+  }
+
+  void _deselectThread(String id) {
+    if (threadId != id) return;
+    threadId = null;
+    imageDrafts.bind(host?.id, projectId, null);
+  }
+
+  void _applyThreadDeletion(String id) {
+    _threadListRevision++;
+    threads.removeWhere((entry) => entry['id'] == id);
+    timelines.remove(id);
+    runtimeThreads.removeWhere((entry) => entry['id'] == id);
+    approvals.removeWhere((entry) => asJson(entry['params'])['threadId'] == id);
+    _deselectThread(id);
+    _scheduleSave();
+  }
+
+  void _forgetThread(String selectedHost, String id) {
+    _deletedThreads.putIfAbsent(selectedHost, () => <String>{}).add(id);
+    imageLoader.forgetThread(selectedHost, id);
+    unawaited(
+      imageDrafts.forgetThread(selectedHost, id).catchError((Object _) {
+        if (!_disposed && host?.id == selectedHost) {
+          showError('会话已删除，但清理图片恢复记录失败');
+        }
+      }),
+    );
+    if (!_disposed && host?.id == selectedHost) {
+      _applyThreadDeletion(id);
+    } else {
+      unawaited(_purgeDeletedCache(selectedHost));
+    }
+  }
+
+  Future<void> _purgeDeletedCache(String selectedHost) async {
+    try {
+      final cache = await storage.read('cache-$selectedHost');
+      if (!_disposed && host?.id == selectedHost) return;
+      final deleted = _deletedThreads[selectedHost] ?? <String>{};
+      cache['deletedThreads'] = deleted.toList();
+      cache['threads'] = asList(cache['threads'])
+          .where((entry) => !deleted.contains(entry['id']))
+          .toList();
+      cache['timelines'] = asJson(cache['timelines'])
+        ..removeWhere((key, _) => deleted.contains(key));
+      cache['runtimeThreads'] = asList(cache['runtimeThreads'])
+          .where((entry) => !deleted.contains(entry['id']))
+          .toList();
+      cache['approvals'] = asList(cache['approvals'])
+          .where(
+            (entry) => !deleted.contains(asJson(entry['params'])['threadId']),
+          )
+          .toList();
+      if (deleted.contains(cache['threadId'])) cache['threadId'] = null;
+      await storage.write('cache-$selectedHost', cache);
+    } catch (_) {
+      if (!_disposed && host?.id == selectedHost) showError('会话已删除，但清理本地缓存失败');
+    }
+  }
+
+  Future<void> archiveThread(
+    String id,
+    bool restore, {
+    ThreadActionContext? context,
+  }) => _manageThread(
+    id,
+    restore ? 'thread/unarchive' : 'thread/archive',
+    context: context,
+  );
+
+  Future<void> deleteThread(String id, {ThreadActionContext? context}) =>
+      _manageThread(id, 'thread/delete', context: context);
+
+  Future<void> _manageThread(
+    String id,
+    String method, {
+    ThreadActionContext? context,
+  }) async {
+    final scope = context ?? threadActionContext;
+    if (_disposed || scope != threadActionContext) return;
+    final deleting = method == 'thread/delete';
+    final blocked = threadActionBlocked(id, delete: deleting);
+    if (blocked != null) throw RpcException('THREAD_ACTION_BLOCKED', blocked);
+    final key = (host?.id, id);
+    _threadActions.add(key);
+    notifyListeners();
+    try {
+      try {
+        await rpc(method, {'threadId': id, 'projectId': scope.$3});
+      } catch (failure) {
+        if (deleting && (_deletedThreads[scope.$2]?.contains(id) ?? false)) {
+          return;
+        }
+        if (_disposed || scope != threadActionContext) return;
+        final unknown =
+            failure is TimeoutException ||
+            (failure is RpcException &&
+                ['OUTCOME_UNKNOWN', 'UPSTREAM_LOST'].contains(failure.code));
+        if (unknown) {
+          for (final entry in runtimeThreads.where(
+            (entry) => entry['id'] == id,
+          )) {
+            entry['state'] = 'unknown';
+          }
+        }
+        final message = unknown
+            ? '操作结果未知，请刷新并核实会话状态，不会自动重试'
+            : switch (failure is RpcException ? failure.code : '') {
+                'EXTERNAL_THREAD' => '不支持操作尚未由 Bridge 管理的会话',
+                'THREAD_BUSY' => '会话正在执行或处理中，请稍后再操作',
+                'THREAD_PENDING_APPROVAL' => '请先处理此会话的待审批请求',
+                'PROJECT_MISMATCH' => '会话不属于当前项目',
+                'METHOD_NOT_ALLOWED' => '请升级主机 Bridge 后再操作',
+                'UNAUTHORIZED' => '设备授权已失效，请重新配对',
+                _ => '会话操作失败，请检查连接或主机状态',
+              };
+        throw RpcException(
+          unknown ? 'OUTCOME_UNKNOWN' : 'THREAD_ACTION_FAILED',
+          message,
+        );
+      }
+      if (deleting) _forgetThread(scope.$2!, id);
+      if (_disposed || scope != threadActionContext) return;
+      if (!deleting) {
+        _threadListRevision++;
+        if (archived != (method == 'thread/archive')) {
+          threads.removeWhere((entry) => entry['id'] == id);
+        }
+        if (method == 'thread/archive') _deselectThread(id);
+      }
+      notifyListeners();
+      _scheduleSave();
+      try {
+        await loadThreads();
+      } catch (_) {
+        if (!_disposed && scope == threadActionContext) {
+          showError('操作已完成，但刷新列表失败，请稍后刷新');
+        }
+      }
+    } finally {
+      _threadActions.remove(key);
+      if (!_disposed && scope == threadActionContext) {
+        notifyListeners();
+        _scheduleSave();
+      }
+    }
   }
 
   Future<void> loadTools() async {
@@ -905,6 +1170,9 @@ class Workbench extends ChangeNotifier {
     if (selected == null || selectedProject == null) {
       throw const RpcException('OFFLINE', '未连接主机');
     }
+    if (_threadDeleted(task)) {
+      throw const RpcException('CONTEXT_CHANGED', '会话已删除');
+    }
     final bytes = await imageLoader.load(
       host: selected,
       projectId: selectedProject,
@@ -919,6 +1187,7 @@ class Workbench extends ChangeNotifier {
         generation != _generation ||
         host?.id != selected.id ||
         projectId != selectedProject ||
+        _threadDeleted(task) ||
         threadId != task) {
       throw const RpcException('CONTEXT_CHANGED', '当前任务已切换');
     }
@@ -958,6 +1227,7 @@ class Workbench extends ChangeNotifier {
         'cursor': cursor,
         'approvals': approvals,
         'runtimeThreads': runtimeThreads,
+        'deletedThreads': _deletedThreads[selected.id]?.toList() ?? <String>[],
       });
     } catch (failure) {
       if (!_disposed) {

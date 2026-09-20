@@ -16,6 +16,7 @@ export class Controller extends EventEmitter {
   private threadLocks = new Set<string>();
   private liveApprovals = new Map<string, ObjectMap>();
   private loaded = new Set<string>();
+  private deletedThreads = new Set<string>();
   private decoders = new Map<string, StringDecoder>();
   constructor(readonly store: Store, readonly codex: RpcPeer) {
     super();
@@ -32,15 +33,18 @@ export class Controller extends EventEmitter {
   info(): ObjectMap {
     const runtime = this.store.runtime();
     return {
-      protocolVersion: PROTOCOL_VERSION, bridgeVersion: '0.1.0', codexVersion: CODEX_VERSION,
+      protocolVersion: PROTOCOL_VERSION, bridgeVersion: '0.1.1', codexVersion: CODEX_VERSION,
       hostName: hostname(), platform: process.platform, homeDirectory: homedir(), epoch: this.store.epoch,
       ready: this.codex.ready, runningTasks: runtime.threads.filter((entry: any) => ['running', 'starting'].includes(entry.state)).length,
       pendingRequests: runtime.approvals.length,
-      capabilities: ['threads', 'streaming', 'approvals', 'models', 'modes', 'skills', 'mcp', 'files', 'diff', 'terminal', 'replay', 'imageUpload', 'imageRead'],
+      capabilities: ['threads', 'streaming', 'approvals', 'models', 'modes', 'skills', 'mcp', 'files', 'diff', 'terminal', 'replay', 'imageUpload', 'imageRead', 'threadDelete'],
     };
   }
   private notification(message: ObjectMap): void {
     const params = message.params ?? {};
+    if (message.method === 'thread/deleted') this.forgetThread(params.threadId);
+    else if (this.deletedThreads.has(params.threadId)) return;
+    if (message.method === 'thread/archived') this.loaded.delete(params.threadId);
     if (message.method === 'turn/started') this.store.threadState(params.threadId, 'running', params.turn?.id);
     if (message.method === 'turn/completed') {
       this.store.threadState(params.threadId, 'idle');
@@ -68,6 +72,10 @@ export class Controller extends EventEmitter {
     this.publish(message.method, params);
   }
   private serverRequest(message: ObjectMap): void {
+    if (this.deletedThreads.has(message.params?.threadId)) {
+      this.codex.reject(message.id, 'Task has been deleted');
+      return;
+    }
     if (!approvalSchemas[message.method]) {
       this.codex.reject(message.id, `Client cannot safely handle ${message.method}`);
       this.publish('bridge/unsupportedRequest', { method: message.method, threadId: message.params?.threadId });
@@ -99,6 +107,40 @@ export class Controller extends EventEmitter {
     const owned = this.store.thread(id);
     if (!owned) throw new BridgeError('EXTERNAL_THREAD', 'Resume or fork this external thread before controlling it');
     return owned;
+  }
+  private forgetThread(id: string): void {
+    this.deletedThreads.add(id);
+    this.loaded.delete(id);
+    this.store.removeThread(id);
+    for (const [key, approval] of this.liveApprovals) {
+      if (approval.params.threadId === id) this.liveApprovals.delete(key);
+    }
+  }
+  private async manageThread(method: string, input: ObjectMap, projectId?: string): Promise<ObjectMap> {
+    const id = text(input.threadId, 'threadId');
+    if (Object.keys(input).some(key => key !== 'threadId')) throw new BridgeError('INVALID_PARAMS', 'Only threadId and projectId are accepted');
+    validateSchema(codexMethods[method]!, input);
+    if (method === 'thread/delete') this.store.project(text(projectId, 'projectId'));
+    const owned = this.requireOwned(id);
+    if (projectId && owned.project !== projectId) throw new BridgeError('PROJECT_MISMATCH', 'Task belongs to another project');
+    if (this.threadLocks.has(id) || ['running', 'starting'].includes(owned.state)) throw new BridgeError('THREAD_BUSY', 'Wait for the task to stop before managing it');
+    if (owned.state !== 'idle') throw new BridgeError('OUTCOME_UNKNOWN', 'Inspect and explicitly reopen the task before managing it');
+    if (this.store.pending().some(approval => approval.params?.threadId === id)) throw new BridgeError('THREAD_PENDING_APPROVAL', 'Resolve the task requests first');
+    this.threadLocks.add(id);
+    try {
+      const result = await this.codex.request(method, input);
+      if (method === 'thread/delete') {
+        const notified = this.deletedThreads.has(id);
+        this.forgetThread(id);
+        if (!notified) this.publish('thread/deleted', { threadId: id });
+      } else if (method === 'thread/archive') {
+        this.loaded.delete(id);
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof BridgeError && ['OUTCOME_UNKNOWN', 'UPSTREAM_LOST'].includes(error.code)) this.store.threadState(id, 'unknown');
+      throw error;
+    } finally { this.threadLocks.delete(id); }
   }
   private async readThread(input: ThreadReadParams): Promise<ObjectMap> {
     try { return await this.codex.request('thread/read', input); }
@@ -174,31 +216,36 @@ export class Controller extends EventEmitter {
     }
     if (method === 'thread/list' && projectId) input.cwd = this.store.project(projectId).path;
     if (method === 'skills/list' && projectId) input.cwds = [this.store.project(projectId).path];
+    if (['thread/archive', 'thread/unarchive', 'thread/delete'].includes(method)) return this.manageThread(method, input, projectId);
     if (['thread/start', 'thread/resume', 'thread/fork'].includes(method)) {
-      const project = this.store.project(text(projectId, 'projectId'));
-      const policy = await this.policy(permissionMode);
-      input.cwd = project.path; input.sandbox = policy.sandbox; input.approvalPolicy = policy.approvalPolicy;
-      if (method === 'thread/start') input.historyMode = 'legacy' satisfies ThreadHistoryMode;
-      if (method === 'thread/resume' && !this.store.thread(text(input.threadId, 'threadId'))) {
-        const source = await this.codex.request('thread/read', { threadId: input.threadId, includeTurns: true });
-        if (source.thread?.status?.type === 'active' || source.thread?.turns?.some((turn: any) => turn.status === 'inProgress')) throw new BridgeError('THREAD_ACTIVE_ELSEWHERE', 'End the external task before resuming; fork to work independently');
-        if (!confirmed) throw new BridgeError('CONFIRM_EXTERNAL_STOPPED', 'Confirm the other client has stopped this thread, or fork it');
-      }
-      if (method === 'thread/resume' && this.loaded.has(input.threadId)) return this.readThread({ threadId: input.threadId, includeTurns: true });
-      validateSchema(codexMethods[method]!, input);
-      const result = await this.codex.request(method, input);
-      this.store.ownThread(result.thread.id, project.id); this.loaded.add(result.thread.id);
-      if (this.store.thread(result.thread.id)?.state === 'unknown' && result.thread.status?.type !== 'active') this.store.threadState(result.thread.id, 'idle');
-      return result;
-    }
-    if (['turn/start', 'turn/steer', 'turn/interrupt', 'thread/name/set', 'thread/archive', 'thread/unarchive'].includes(method)) {
-      if (method === 'thread/unarchive' && !this.store.thread(text(input.threadId, 'threadId'))) {
+      if (method !== 'thread/start' && this.deletedThreads.has(input.threadId)) throw new BridgeError('THREAD_DELETED', 'Task has been deleted');
+      if (method === 'thread/resume' && this.threadLocks.has(input.threadId)) throw new BridgeError('THREAD_BUSY', 'Task is being modified');
+      if (method === 'thread/resume') this.threadLocks.add(input.threadId);
+      try {
         const project = this.store.project(text(projectId, 'projectId'));
+        const owned = method === 'thread/resume' ? this.store.thread(text(input.threadId, 'threadId')) : undefined;
+        if (owned && owned.project !== project.id) throw new BridgeError('PROJECT_MISMATCH', 'Task belongs to another project');
+        const policy = await this.policy(permissionMode);
+        input.cwd = project.path; input.sandbox = policy.sandbox; input.approvalPolicy = policy.approvalPolicy;
+        if (method === 'thread/start') input.historyMode = 'legacy' satisfies ThreadHistoryMode;
+        if (method === 'thread/resume' && !owned) {
+          const source = await this.codex.request('thread/read', { threadId: input.threadId, includeTurns: true });
+          if (source.thread?.status?.type === 'active' || source.thread?.turns?.some((turn: any) => turn.status === 'inProgress')) throw new BridgeError('THREAD_ACTIVE_ELSEWHERE', 'End the external task before resuming; fork to work independently');
+          if (!confirmed) throw new BridgeError('CONFIRM_EXTERNAL_STOPPED', 'Confirm the other client has stopped this thread, or fork it');
+        }
         validateSchema(codexMethods[method]!, input);
-        const result = await this.codex.request(method, input);
-        this.store.ownThread(input.threadId, project.id);
+        const alreadyLoaded = method === 'thread/resume' && this.loaded.has(input.threadId);
+        const result = alreadyLoaded
+          ? await this.readThread({ threadId: input.threadId, includeTurns: true })
+          : await this.codex.request(method, input);
+        if (this.deletedThreads.has(input.threadId) || this.deletedThreads.has(result.thread.id)) throw new BridgeError('THREAD_DELETED', 'Task has been deleted');
+        if (!alreadyLoaded) { this.store.ownThread(result.thread.id, project.id); this.loaded.add(result.thread.id); }
+        const resumedId = alreadyLoaded ? input.threadId : result.thread.id;
+        if (this.store.thread(resumedId)?.state === 'unknown' && result.thread.status?.type !== 'active' && !result.thread.turns?.some((turn: any) => turn.status === 'inProgress')) this.store.threadState(resumedId, 'idle');
         return result;
-      }
+      } finally { if (method === 'thread/resume') this.threadLocks.delete(input.threadId); }
+    }
+    if (['turn/start', 'turn/steer', 'turn/interrupt', 'thread/name/set'].includes(method)) {
       const owned = this.requireOwned(text(input.threadId, 'threadId'));
       if (projectId && owned.project !== projectId) throw new BridgeError('PROJECT_MISMATCH', 'Task belongs to another project');
       if (method === 'turn/start') {

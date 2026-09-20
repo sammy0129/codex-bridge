@@ -35,6 +35,8 @@ class ImageDraftController extends ChangeNotifier {
   bool _disposed = false;
   Future<void>? _recovery;
   int _binding = 0;
+  final _deletedThreads = <(String?, String?)>{};
+  Future<void> _metadataQueue = Future.value();
   ImageDraftController(
     this.storage, {
     required this.upload,
@@ -77,21 +79,53 @@ class ImageDraftController extends ChangeNotifier {
 
   bool _current(String draft) => !_disposed && draft == id;
 
+  Future<void> _metadata(Future<void> Function() action) {
+    final next = _metadataQueue.then((_) => action());
+    _metadataQueue = next.catchError((Object _) {});
+    return next;
+  }
+
+  Future<void> forgetThread(String host, String thread) {
+    _deletedThreads.add((host, thread));
+    if (hostId == host && threadId == thread) {
+      bind(hostId, projectId, null);
+    }
+    return _metadata(() async {
+      for (final key in [
+        'pending-image-selection',
+        'recovered-image-selection',
+      ]) {
+        final saved = await storage.read(key);
+        if (saved['hostId'] == host && saved['threadId'] == thread) {
+          await storage.write(key, {});
+        }
+      }
+    });
+  }
+
+  bool _deleted(Json selection) => _deletedThreads.contains((
+    selection['hostId'] as String?,
+    selection['threadId'] as String?,
+  ));
+
   Future<void> _recover() async {
     if (!recoverLostData) return;
     final pending = await storage.read('pending-image-selection');
     if (pending.isEmpty) return;
     final response = await picker.retrieveLostData();
-    if (pending.isNotEmpty && !response.isEmpty) {
-      await storage.write('recovered-image-selection', {
-        ...pending,
-        'paths': (response.files ?? [if (response.file != null) response.file!])
-            .map((file) => file.path)
-            .toList(),
-        if (response.exception != null) 'error': '未能恢复照片，请重新拍照或选择图片',
-      });
-    }
-    await storage.write('pending-image-selection', {});
+    await _metadata(() async {
+      if (pending.isNotEmpty && !response.isEmpty && !_deleted(pending)) {
+        await storage.write('recovered-image-selection', {
+          ...pending,
+          'paths':
+              (response.files ?? [if (response.file != null) response.file!])
+                  .map((file) => file.path)
+                  .toList(),
+          if (response.exception != null) 'error': '未能恢复照片，请重新拍照或选择图片',
+        });
+      }
+      await storage.write('pending-image-selection', {});
+    });
   }
 
   Future<void> _restore(int binding) async {
@@ -105,6 +139,7 @@ class ImageDraftController extends ChangeNotifier {
       if (saved['hostId'] != hostId ||
           saved['projectId'] != projectId ||
           saved['threadId'] != threadId ||
+          _deleted(saved) ||
           saved.isEmpty) {
         return;
       }
@@ -116,7 +151,7 @@ class ImageDraftController extends ChangeNotifier {
         images.add(DraftImage(bytes));
       }
       error = saved['error'] as String?;
-      await storage.write('recovered-image-selection', {});
+      await _metadata(() => storage.write('recovered-image-selection', {}));
       if (_current(draft)) _notify();
     } catch (_) {
       if (!_disposed && binding == _binding) {
@@ -144,9 +179,11 @@ class ImageDraftController extends ChangeNotifier {
     try {
       await (_recovery ??= _recover());
       if (!_current(draft)) return;
-      await storage.write('pending-image-selection', {
-        ...context,
-        'draftId': draft,
+      final selection = {...context, 'draftId': draft};
+      await _metadata(() async {
+        if (_current(draft) && !_deleted(selection)) {
+          await storage.write('pending-image-selection', selection);
+        }
       });
       if (!_current(draft)) return;
       final file = await picker.pickImage(
@@ -176,7 +213,12 @@ class ImageDraftController extends ChangeNotifier {
       if (_current(draft)) error = imageFailureMessage(failure);
     } finally {
       try {
-        await storage.write('pending-image-selection', {});
+        await _metadata(() async {
+          final saved = await storage.read('pending-image-selection');
+          if (saved['draftId'] == draft) {
+            await storage.write('pending-image-selection', {});
+          }
+        });
       } catch (_) {
         if (_current(draft)) error ??= '无法保存图片选择状态';
       }

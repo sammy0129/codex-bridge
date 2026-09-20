@@ -149,3 +149,18 @@ test('expired replay cursor forces snapshot reset rather than claiming complete 
   assert.equal(connection.messages.filter(message => message.type === 'event').length, 0);
   connection.socket.close();
 });
+
+test('revoked devices cannot delete a managed task over an existing socket', async () => {
+  const device = store.pair(store.createPair().code, 'delete-revocation');
+  const directory = await mkdtemp(join(tmpdir(), 'bridge-delete-auth-'));
+  const project = await controller.workspace.register(directory);
+  store.ownThread('protected-task', project.id);
+  const connection = await connect(device.token);
+  assert.ok(connection.messages.find(message => message.type === 'hello')!.capabilities.includes('threadDelete'));
+  store.revoke(device.deviceId);
+  const closed = once(connection.socket, 'close');
+  connection.socket.send(JSON.stringify({ type: 'request', requestId: 'revoked-delete', method: 'thread/delete', params: { projectId: project.id, threadId: 'protected-task' } }));
+  assert.equal((await closed)[0], 4001);
+  assert.equal(store.thread('protected-task')?.project, project.id);
+  assert.equal(connection.messages.some(message => message.requestId === 'revoked-delete' && message.result), false);
+});

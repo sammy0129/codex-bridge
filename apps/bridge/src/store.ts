@@ -101,6 +101,10 @@ export class Store {
   resolveApproval(id: string): void { this.db.prepare("UPDATE approvals SET state='resolved' WHERE id=?").run(id); }
   thread(id: string): ObjectMap | undefined { return this.db.prepare('SELECT * FROM threads WHERE id=?').get(id) as ObjectMap | undefined; }
   ownThread(id: string, project: string): void { this.db.prepare("INSERT OR IGNORE INTO threads VALUES (?,?,'idle',NULL)").run(id, project); }
+  removeThread(id: string): void {
+    this.db.prepare('DELETE FROM threads WHERE id=?').run(id);
+    this.db.prepare("UPDATE approvals SET state='resolved' WHERE json_extract(payload, '$.params.threadId')=? AND state='pending'").run(id);
+  }
   threadState(id: string, state: string, turn?: string): void { this.db.prepare('UPDATE threads SET state=?,turn=? WHERE id=?').run(state, turn ?? null, id); }
   runtime(): ObjectMap { return { threads: this.db.prepare('SELECT * FROM threads').all(), terminals: this.db.prepare('SELECT * FROM terminals').all(), approvals: this.pending() }; }
   close(): void { this.db.close(); }

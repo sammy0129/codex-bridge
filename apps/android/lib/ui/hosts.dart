@@ -228,7 +228,7 @@ class HostsPane extends StatelessWidget {
       ),
       const SizedBox(height: 24),
       const Text(
-        'Codex Bridge · 0.1.0\n非官方个人客户端 · HTTPS / WSS\n无需把 Codex 登录凭证复制到手机',
+        'Codex Bridge · 0.1.1\n非官方个人客户端 · HTTPS / WSS\n无需把 Codex 登录凭证复制到手机',
         style: TextStyle(fontSize: 12, height: 1.8),
       ),
     ],

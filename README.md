@@ -89,7 +89,7 @@ flutter build apk --debug --target-platform android-arm64 --split-per-abi
 
 调试安装包：`apps/android/build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk`，仅包含 ARM64-v8a。
 
-`v0.1.0` Release 仅提供 ARM64-v8a 调试包（约 97 MiB），校验值和本次验证结果见 `docs/releases/v0.1.0.md`。如需通用包可自行运行 `flutter build apk --debug`。GitHub Release 中的调试包不代表正式签名构建。
+`v0.1.1` Release 仅提供 ARM64-v8a 调试包（约 97 MiB），校验值和本次验证结果见 `docs/releases/v0.1.1.md`。如需通用包可自行运行 `flutter build apk --debug`。GitHub Release 中的调试包不代表正式签名构建。
 
 发布版本必须自行准备签名密钥，把 `android/key.properties.example` 复制为 `android/key.properties` 并填入本地私密配置。**发布构建不会回退使用调试签名**。密钥、密码和签名配置均被忽略，不应提交。
 

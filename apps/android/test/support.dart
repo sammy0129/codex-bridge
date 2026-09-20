@@ -169,3 +169,46 @@ Workbench fixtureWorkbench({bool empty = false}) {
   workbench.transport = FakeTransport();
   return workbench;
 }
+
+Workbench managedWorkbench() {
+  final workbench = fixtureWorkbench();
+  workbench.info['capabilities'] = ['threads', 'threadDelete'];
+  workbench.runtimeThreads = [
+    for (final entry in workbench.threads)
+      {'id': entry['id'], 'project': 'project', 'state': 'idle'},
+  ];
+  final active = workbench.threads
+      .map((entry) => Map<String, dynamic>.from(entry))
+      .toList();
+  final archived = <Json>[];
+  (workbench.transport! as FakeTransport).handler = (method, params) async {
+    final id = params['threadId'];
+    if (method == 'thread/list') {
+      return {
+        'data': List<Json>.from(params['archived'] == true ? archived : active),
+      };
+    }
+    if (method == 'thread/archive' || method == 'thread/unarchive') {
+      final source = method == 'thread/archive' ? active : archived;
+      final destination = method == 'thread/archive' ? archived : active;
+      final thread = source.where((entry) => entry['id'] == id).firstOrNull;
+      source.removeWhere((entry) => entry['id'] == id);
+      if (thread != null) destination.add(thread);
+    }
+    if (method == 'thread/delete') {
+      active.removeWhere((entry) => entry['id'] == id);
+      archived.removeWhere((entry) => entry['id'] == id);
+    }
+    if (method == 'thread/read' || method == 'thread/resume') {
+      return {
+        'thread': {
+          'id': id,
+          'status': {'type': 'idle'},
+          'turns': [],
+        },
+      };
+    }
+    return {};
+  };
+  return workbench;
+}

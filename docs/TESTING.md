@@ -4,6 +4,10 @@
 
 仓库根目录 `npm test`；`apps/android` 中执行 `flutter analyze` 与 `flutter test`。Flutter 界面用明确标识的 fixture 数据测试，不注入正式 App。
 
+会话管理回归：Bridge 的 `thread-actions.test.ts` 覆盖归属、项目校验、忙碌/未知状态、审批、并发锁、删除通知及请求去重；Android 的 `thread_actions_test.dart` 和 `thread_actions_widget_test.dart` 覆盖长按菜单、归档/恢复、删除确认、旧 Bridge、上下文切换、迟到响应和失败处理。图片测试另覆盖删除时的相机选择、上传、Android 恢复结果失效及定向缓存清理。深浅色菜单截图生成于 `.local/screenshots/thread-actions-*.png`。
+
+以上自动化使用测试会话和模拟上游，不删除真实主机会话、不运行付费模型任务。真机长按手感、系统返回键、相机方向和进后台恢复需另外验收；更新运行中的 Bridge 必须另获明确重启批准。
+
 截图输出到根目录 `.local/screenshots`。Windows 界面测试按需加载本机字体以便人工检查，CI 不依赖该路径存在。
 
 ## Android 模拟器与真实 Codex

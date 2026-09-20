@@ -66,9 +66,12 @@ class ChatImageCache {
     }
     if (_pending.containsKey(key)) return _pending[key]!;
     final generation = _generation;
-    final future = Future<Uint8List>.sync(fetch)
+    late final Future<Uint8List> future;
+    future = Future<Uint8List>.sync(fetch)
         .then((bytes) {
-          if (generation == _generation && bytes.length <= maxBytes) {
+          if (generation == _generation &&
+              identical(_pending[key], future) &&
+              bytes.length <= maxBytes) {
             while (_entries.isNotEmpty &&
                 (_bytes + bytes.length > maxBytes ||
                     _entries.length >= maxEntries)) {
@@ -80,7 +83,7 @@ class ChatImageCache {
           return bytes;
         })
         .whenComplete(() {
-          if (generation == _generation) _pending.remove(key);
+          if (identical(_pending[key], future)) _pending.remove(key);
         });
     _pending[key] = future;
     return future;
@@ -91,6 +94,13 @@ class ChatImageCache {
     _entries.clear();
     _pending.clear();
     _bytes = 0;
+  }
+
+  void removeWhere(bool Function(String) matches) {
+    for (final key in _entries.keys.where(matches).toList()) {
+      _bytes -= _entries.remove(key)!.length;
+    }
+    _pending.removeWhere((key, _) => matches(key));
   }
 }
 
@@ -106,6 +116,11 @@ class ChatImageLoader {
   ChatImageLoader({ChatImageCache? cache, ImageDownload? download})
     : cache = cache ?? ChatImageCache(),
       download = download ?? httpImage;
+
+  void forgetThread(String hostId, String threadId) {
+    final prefix = '${jsonEncode([hostId, threadId])}:';
+    cache.removeWhere((key) => key.startsWith(prefix));
+  }
 
   Future<Uint8List> load({
     required Host host,
@@ -134,7 +149,7 @@ class ChatImageLoader {
           ),
         )
         .toString();
-    return cache.load(key, () async {
+    return cache.load('${jsonEncode([host.id, threadId])}:$key', () async {
       Uint8List bytes;
       if (content['type'] == 'localImage') {
         if (!supportsRead) {

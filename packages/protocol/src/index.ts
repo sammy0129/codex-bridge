@@ -18,6 +18,7 @@ export const codexMethods: Record<string, string> = {
   'thread/start': 'ThreadStartParams', 'thread/resume': 'ThreadResumeParams',
   'thread/fork': 'ThreadForkParams', 'thread/name/set': 'ThreadSetNameParams',
   'thread/archive': 'ThreadArchiveParams', 'thread/unarchive': 'ThreadUnarchiveParams',
+  'thread/delete': 'ThreadDeleteParams',
   'turn/start': 'TurnStartParams', 'turn/steer': 'TurnSteerParams', 'turn/interrupt': 'TurnInterruptParams',
   'model/list': 'ModelListParams', 'collaborationMode/list': 'CollaborationModeListParams',
   'skills/list': 'SkillsListParams', 'mcpServerStatus/list': 'ListMcpServerStatusParams',

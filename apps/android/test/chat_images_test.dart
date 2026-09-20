@@ -24,6 +24,7 @@ class FakePicker extends ImagePicker {
   Future<XFile?> Function()? selection;
   ImageSource? source;
   LostDataResponse recovered = LostDataResponse.empty();
+  Future<LostDataResponse> Function()? recovery;
   int recoveryCalls = 0;
 
   @override
@@ -44,7 +45,7 @@ class FakePicker extends ImagePicker {
   @override
   Future<LostDataResponse> retrieveLostData() async {
     recoveryCalls++;
-    return recovered;
+    return recovery == null ? recovered : recovery!();
   }
 }
 
@@ -283,6 +284,160 @@ void main() {
       await draft.uploadImage(draft.images.single);
       expect(uploads, 1);
       expect(draft.canSend, isTrue);
+    },
+  );
+
+  test('deleted drafts reject late camera selection and preserve other recovery data', () async {
+    final storage = MemoryStore();
+    final selection = Completer<XFile?>();
+    final picker = FakePicker()..selection = () => selection.future;
+    var uploads = 0;
+    final draft = ImageDraftController(
+      storage,
+      picker: picker,
+      recoverLostData: false,
+      upload: (_) async {
+        uploads++;
+        return {'type': 'localImage', 'path': '/fixture/photo.png'};
+      },
+    );
+    addTearDown(draft.dispose);
+    draft.bind('host', 'project', 'task');
+    final pending = draft.pick(ImageSource.camera);
+    await settleDraft();
+    await storage.write('recovered-image-selection', {
+      'hostId': 'other',
+      'threadId': 'task',
+      'draftId': 'other-draft',
+    });
+    await draft.forgetThread('host', 'task');
+    selection.complete(XFile.fromData(photo, name: 'photo.png'));
+    await pending;
+    expect(draft.images, isEmpty);
+    expect(draft.threadId, isNull);
+    expect(uploads, 0);
+    expect(await storage.read('pending-image-selection'), isEmpty);
+    expect(
+      (await storage.read('recovered-image-selection'))['hostId'],
+      'other',
+    );
+  });
+
+  test(
+    'deleted drafts reject late uploads and Android lost-selection recovery',
+    () async {
+      final storage = MemoryStore();
+      final gate = Completer<Json>();
+      final draft = ImageDraftController(
+        storage,
+        picker: FakePicker(),
+        recoverLostData: false,
+        upload: (_) => gate.future,
+      );
+      addTearDown(draft.dispose);
+      draft.bind('host', 'project', 'task');
+      final selecting = draft.pick(ImageSource.gallery);
+      await settleDraft();
+      expect(draft.images.single.state, ImageUploadState.uploading);
+      await draft.forgetThread('host', 'task');
+      gate.complete({'type': 'localImage', 'path': '/fixture/photo.png'});
+      await selecting;
+      expect(draft.images, isEmpty);
+      await storage.write('pending-image-selection', {
+        'hostId': 'host',
+        'projectId': 'project',
+        'threadId': 'task',
+        'draftId': 'old',
+      });
+      final recovery = Completer<LostDataResponse>();
+      final picker = FakePicker()..recovery = () => recovery.future;
+      final recoveredDraft = ImageDraftController(
+        storage,
+        picker: picker,
+        recoverLostData: true,
+        upload: (_) async => throw StateError('must not upload'),
+      );
+      addTearDown(recoveredDraft.dispose);
+      recoveredDraft.bind('host', 'project', 'task');
+      await settleDraft();
+      await recoveredDraft.forgetThread('host', 'task');
+      recovery.complete(
+        LostDataResponse(files: [XFile.fromData(photo, name: 'photo.png')]),
+      );
+      await settleDraft();
+      expect(recoveredDraft.images, isEmpty);
+      expect(await storage.read('pending-image-selection'), isEmpty);
+      expect(await storage.read('recovered-image-selection'), isEmpty);
+    },
+  );
+
+  test('thread eviction keeps other image caches and cannot revive a pending entry', () async {
+    final cache = ChatImageCache();
+    await cache.load('host:other', () async => photo);
+    final stale = Completer<Uint8List>();
+    final fresh = Completer<Uint8List>();
+    final old = cache.load('host:task', () => stale.future);
+    cache.removeWhere((key) => key == 'host:task');
+    final current = cache.load('host:task', () => fresh.future);
+    stale.complete(Uint8List.fromList([1, 2]));
+    await old;
+    final deduplicated = cache.load(
+      'host:task',
+      () async => throw StateError('must remain deduplicated'),
+    );
+    fresh.complete(photo);
+    expect(await current, photo);
+    expect(await deduplicated, photo);
+    expect(
+      await cache.load(
+        'host:other',
+        () async => throw StateError('other cache was evicted'),
+      ),
+      photo,
+    );
+    expect(
+      await cache.load(
+        'host:task',
+        () async => throw StateError('fresh cache lost'),
+      ),
+      photo,
+    );
+  });
+
+  test(
+    'loader thread eviction isolates the same task id across hosts',
+    () async {
+      final requests = <String>[];
+      final loader = ChatImageLoader(
+        download: (uri, {fingerprint, token}) async {
+          requests.add(uri.host);
+          return photo;
+        },
+      );
+      Future<Uint8List> load(String hostId, String task) => loader.load(
+        host: Host(
+          id: hostId,
+          name: hostId,
+          url: 'https://$hostId.test',
+          deviceId: hostId,
+        ),
+        projectId: 'project',
+        threadId: task,
+        itemId: 'item',
+        contentIndex: 0,
+        content: {'type': 'localImage', 'path': '/fixture/image.png'},
+        supportsRead: true,
+        token: () async => 'fixture',
+      );
+      await load('host-a', 'task');
+      await load('host-b', 'task');
+      await load('host-a', 'other');
+      loader.forgetThread('host-a', 'task');
+      await load('host-b', 'task');
+      await load('host-a', 'other');
+      expect(requests, hasLength(3));
+      await load('host-a', 'task');
+      expect(requests, hasLength(4));
     },
   );
 
